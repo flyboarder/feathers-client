@@ -1,6 +1,5 @@
 (function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.feathers = f()}})(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
 (function (process){
-
 /**
  * This is the web browser implementation of `debug()`.
  *
@@ -40,14 +39,23 @@ exports.colors = [
  */
 
 function useColors() {
+  // NB: In an Electron preload script, document will be defined but not fully
+  // initialized. Since we know we're in Chrome, we'll just detect this case
+  // explicitly
+  if (typeof window !== 'undefined' && typeof window.process !== 'undefined' && window.process.type === 'renderer') {
+    return true;
+  }
+
   // is webkit? http://stackoverflow.com/a/16459606/376773
   // document is undefined in react-native: https://github.com/facebook/react-native/pull/1632
   return (typeof document !== 'undefined' && 'WebkitAppearance' in document.documentElement.style) ||
     // is firebug? http://stackoverflow.com/a/398120/376773
-    (window.console && (console.firebug || (console.exception && console.table))) ||
+    (typeof window !== 'undefined' && window.console && (console.firebug || (console.exception && console.table))) ||
     // is firefox >= v31?
     // https://developer.mozilla.org/en-US/docs/Tools/Web_Console#Styling_messages
-    (navigator.userAgent.toLowerCase().match(/firefox\/(\d+)/) && parseInt(RegExp.$1, 10) >= 31);
+    (navigator && navigator.userAgent && navigator.userAgent.toLowerCase().match(/firefox\/(\d+)/) && parseInt(RegExp.$1, 10) >= 31) ||
+    // double check webkit in userAgent just in case we are in a worker
+    (navigator && navigator.userAgent && navigator.userAgent.toLowerCase().match(/applewebkit\/(\d+)/));
 }
 
 /**
@@ -69,8 +77,7 @@ exports.formatters.j = function(v) {
  * @api public
  */
 
-function formatArgs() {
-  var args = arguments;
+function formatArgs(args) {
   var useColors = this.useColors;
 
   args[0] = (useColors ? '%c' : '')
@@ -80,17 +87,17 @@ function formatArgs() {
     + (useColors ? '%c ' : ' ')
     + '+' + exports.humanize(this.diff);
 
-  if (!useColors) return args;
+  if (!useColors) return;
 
   var c = 'color: ' + this.color;
-  args = [args[0], c, 'color: inherit'].concat(Array.prototype.slice.call(args, 1));
+  args.splice(1, 0, c, 'color: inherit')
 
   // the final "%c" is somewhat tricky, because there could be other
   // arguments passed either before or after the %c, so we need to
   // figure out the correct index to insert the CSS into
   var index = 0;
   var lastC = 0;
-  args[0].replace(/%[a-z%]/g, function(match) {
+  args[0].replace(/%[a-zA-Z%]/g, function(match) {
     if ('%%' === match) return;
     index++;
     if ('%c' === match) {
@@ -101,7 +108,6 @@ function formatArgs() {
   });
 
   args.splice(lastC, 0, c);
-  return args;
 }
 
 /**
@@ -144,7 +150,6 @@ function save(namespaces) {
  */
 
 function load() {
-  var r;
   try {
     return exports.storage.debug;
   } catch(e) {}
@@ -172,14 +177,19 @@ exports.enable(load());
  * @api private
  */
 
-function localstorage(){
+function localstorage() {
   try {
     return window.localStorage;
   } catch (e) {}
 }
 
+/** Attach to Window*/
+if (window) {
+  window.debug = exports;
+}
+
 }).call(this,require('_process'))
-},{"./debug":2,"_process":53}],2:[function(require,module,exports){
+},{"./debug":2,"_process":55}],2:[function(require,module,exports){
 
 /**
  * This is the common logic for both the Node.js and web browser
@@ -188,7 +198,7 @@ function localstorage(){
  * Expose `debug()` as the module.
  */
 
-exports = module.exports = debug.debug = debug;
+exports = module.exports = createDebug.debug = createDebug.default = createDebug;
 exports.coerce = coerce;
 exports.disable = disable;
 exports.enable = enable;
@@ -205,16 +215,10 @@ exports.skips = [];
 /**
  * Map of special "%n" handling functions, for the debug "format" argument.
  *
- * Valid key names are a single, lowercased letter, i.e. "n".
+ * Valid key names are a single, lower or upper-case letter, i.e. "n" and "N".
  */
 
 exports.formatters = {};
-
-/**
- * Previously assigned color.
- */
-
-var prevColor = 0;
 
 /**
  * Previous log timestamp.
@@ -224,13 +228,20 @@ var prevTime;
 
 /**
  * Select a color.
- *
+ * @param {String} namespace
  * @return {Number}
  * @api private
  */
 
-function selectColor() {
-  return exports.colors[prevColor++ % exports.colors.length];
+function selectColor(namespace) {
+  var hash = 0, i;
+
+  for (i in namespace) {
+    hash  = ((hash << 5) - hash) + namespace.charCodeAt(i);
+    hash |= 0; // Convert to 32bit integer
+  }
+
+  return exports.colors[Math.abs(hash) % exports.colors.length];
 }
 
 /**
@@ -241,17 +252,13 @@ function selectColor() {
  * @api public
  */
 
-function debug(namespace) {
+function createDebug(namespace) {
 
-  // define the `disabled` version
-  function disabled() {
-  }
-  disabled.enabled = false;
+  function debug() {
+    // disabled?
+    if (!debug.enabled) return;
 
-  // define the `enabled` version
-  function enabled() {
-
-    var self = enabled;
+    var self = debug;
 
     // set `diff` timestamp
     var curr = +new Date();
@@ -261,10 +268,7 @@ function debug(namespace) {
     self.curr = curr;
     prevTime = curr;
 
-    // add the `color` if not set
-    if (null == self.useColors) self.useColors = exports.useColors();
-    if (null == self.color && self.useColors) self.color = selectColor();
-
+    // turn the `arguments` into a proper Array
     var args = new Array(arguments.length);
     for (var i = 0; i < args.length; i++) {
       args[i] = arguments[i];
@@ -273,13 +277,13 @@ function debug(namespace) {
     args[0] = exports.coerce(args[0]);
 
     if ('string' !== typeof args[0]) {
-      // anything else let's inspect with %o
-      args = ['%o'].concat(args);
+      // anything else let's inspect with %O
+      args.unshift('%O');
     }
 
     // apply any `formatters` transformations
     var index = 0;
-    args[0] = args[0].replace(/%([a-z%])/g, function(match, format) {
+    args[0] = args[0].replace(/%([a-zA-Z%])/g, function(match, format) {
       // if we encounter an escaped % then don't increase the array index
       if (match === '%%') return match;
       index++;
@@ -295,19 +299,24 @@ function debug(namespace) {
       return match;
     });
 
-    // apply env-specific formatting
-    args = exports.formatArgs.apply(self, args);
+    // apply env-specific formatting (colors, etc.)
+    exports.formatArgs.call(self, args);
 
-    var logFn = enabled.log || exports.log || console.log.bind(console);
+    var logFn = debug.log || exports.log || console.log.bind(console);
     logFn.apply(self, args);
   }
-  enabled.enabled = true;
 
-  var fn = exports.enabled(namespace) ? enabled : disabled;
+  debug.namespace = namespace;
+  debug.enabled = exports.enabled(namespace);
+  debug.useColors = exports.useColors();
+  debug.color = selectColor(namespace);
 
-  fn.namespace = namespace;
+  // env-specific initialization logic for debug instances
+  if ('function' === typeof exports.init) {
+    exports.init(debug);
+  }
 
-  return fn;
+  return debug;
 }
 
 /**
@@ -326,7 +335,7 @@ function enable(namespaces) {
 
   for (var i = 0; i < len; i++) {
     if (!split[i]) continue; // ignore empty strings
-    namespaces = split[i].replace(/[\\^$+?.()|[\]{}]/g, '\\$&').replace(/\*/g, '.*?');
+    namespaces = split[i].replace(/\*/g, '.*?');
     if (namespaces[0] === '-') {
       exports.skips.push(new RegExp('^' + namespaces.substr(1) + '$'));
     } else {
@@ -381,7 +390,7 @@ function coerce(val) {
   return val;
 }
 
-},{"ms":52}],3:[function(require,module,exports){
+},{"ms":54}],3:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -686,303 +695,570 @@ function isUndefined(arg) {
 }
 
 },{}],4:[function(require,module,exports){
-module.exports = require('./lib/client/index');
-
-},{"./lib/client/index":6}],5:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-exports.populateParams = populateParams;
-exports.populateHeader = populateHeader;
 
-function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
+var _populateHeader = require('./populate-header');
 
-function populateParams() {
+var _populateHeader2 = _interopRequireDefault(_populateHeader);
+
+var _populateAccessToken = require('./populate-access-token');
+
+var _populateAccessToken2 = _interopRequireDefault(_populateAccessToken);
+
+var _populateEntity = require('./populate-entity');
+
+var _populateEntity2 = _interopRequireDefault(_populateEntity);
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+var hooks = {
+  populateHeader: _populateHeader2.default,
+  populateAccessToken: _populateAccessToken2.default,
+  populateEntity: _populateEntity2.default
+};
+
+exports.default = hooks;
+module.exports = exports['default'];
+},{"./populate-access-token":5,"./populate-entity":6,"./populate-header":7}],5:[function(require,module,exports){
+'use strict';
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.default = populateAccessToken;
+/*
+ * Exposes the access token to the client side hooks
+ * under hook.params.accessToken.
+ */
+
+function populateAccessToken() {
   return function (hook) {
     var app = hook.app;
 
-    Object.assign(hook.params, {
-      user: app.get('user'),
-      token: app.get('token')
-    });
-  };
-}
-
-function populateHeader() {
-  var options = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
-
-  return function (hook) {
-    if (hook.params.token) {
-      hook.params.headers = Object.assign({}, _defineProperty({}, options.header || 'authorization', hook.params.token), hook.params.headers);
+    if (hook.type !== 'before') {
+      return Promise.reject(new Error('The \'populateAccessToken\' hook should only be used as a \'before\' hook.'));
     }
+
+    Object.assign(hook.params, { accessToken: app.get('accessToken') });
+
+    return Promise.resolve(hook);
   };
 }
+module.exports = exports['default'];
 },{}],6:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
+exports.default = populateEntity;
+/*
+ * Fetch and populate an entity by id encoded in the
+ * access token payload. Useful for easily getting the
+ * current user after authentication, or any other entity.
+ */
 
-exports.default = function () {
-  var opts = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+function populateEntity() {
+  var options = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
 
-  var config = Object.assign({}, defaults, opts);
+  if (!options.service) {
+    throw new Error('You need to pass \'options.service\' to the populateEntity() hook.');
+  }
 
-  return function () {
-    var app = this;
+  if (!options.field) {
+    throw new Error('You need to pass \'options.field\' to the populateEntity() hook.');
+  }
 
-    if (!app.get('storage')) {
-      app.set('storage', (0, _utils.getStorage)(config.storage));
+  if (!options.entity) {
+    throw new Error('You need to pass \'options.entity\' to the populateEntity() hook.');
+  }
+
+  return function (hook) {
+    var app = hook.app;
+
+    if (hook.type !== 'after') {
+      return Promise.reject(new Error('The \'populateEntity\' hook should only be used as an \'after\' hook.'));
     }
 
-    app.authenticate = function () {
-      var options = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+    return app.passport.verifyJWT(hook.result.accessToken).then(function (payload) {
+      var id = payload[options.field];
 
-      var storage = this.get('storage');
-      var getOptions = Promise.resolve(options);
-
-      // If no type was given let's try to authenticate with a stored JWT
-      if (!options.type) {
-        getOptions = (0, _utils.getJWT)(config.tokenKey, config.cookie, this.get('storage')).then(function (token) {
-          if (!token) {
-            return Promise.reject(new _feathersErrors2.default.NotAuthenticated('Could not find stored JWT and no authentication type was given'));
-          }
-
-          return { type: 'token', token: token };
-        });
+      if (!id) {
+        return Promise.reject(new Error('Access token payload is missing the \'' + options.field + '\' field.'));
       }
 
-      var handleResponse = function handleResponse(response) {
-        app.set('token', response.token);
-        app.set('user', response.data);
+      return app.service(options.service).get(id);
+    }).then(function (entity) {
+      hook.result[options.entity] = entity;
+      app.set(options.entity, entity);
 
-        return Promise.resolve(storage.setItem(config.tokenKey, response.token)).then(function () {
-          return response;
-        });
-      };
-
-      return getOptions.then(function (options) {
-        var endPoint = void 0;
-
-        if (options.endpoint) {
-          endPoint = options.endpoint;
-        } else if (options.type === 'local') {
-          endPoint = config.localEndpoint;
-        } else if (options.type === 'token') {
-          endPoint = config.tokenEndpoint;
-        } else {
-          throw new Error('Unsupported authentication \'type\': ' + options.type);
-        }
-
-        return (0, _utils.connected)(app).then(function (socket) {
-          // TODO (EK): Handle OAuth logins
-          // If we are using a REST client
-          if (app.rest) {
-            return app.service(endPoint).create(options).then(handleResponse);
-          }
-
-          var method = app.io ? 'emit' : 'send';
-
-          return (0, _utils.authenticateSocket)(options, socket, method).then(handleResponse);
-        });
-      });
-    };
-
-    // Set our logout method with the correct socket context
-    app.logout = function () {
-      app.set('user', null);
-      app.set('token', null);
-
-      (0, _utils.clearCookie)(config.cookie);
-
-      // remove the token from localStorage
-      return Promise.resolve(app.get('storage').removeItem(config.tokenKey)).then(function () {
-        // If using sockets de-authenticate the socket
-        if (app.io || app.primus) {
-          var method = app.io ? 'emit' : 'send';
-          var socket = app.io ? app.io : app.primus;
-
-          return (0, _utils.logoutSocket)(socket, method);
-        }
-      });
-    };
-
-    // Set up hook that adds token and user to params so that
-    // it they can be accessed by client side hooks and services
-    app.mixins.push(function (service) {
-      if (typeof service.before !== 'function' || typeof service.after !== 'function') {
-        throw new Error('It looks like feathers-hooks isn\'t configured. It is required before running feathers-authentication.');
-      }
-
-      service.before(hooks.populateParams(config));
+      return Promise.resolve(hook);
     });
-
-    // Set up hook that adds authorization header for REST provider
-    if (app.rest) {
-      app.mixins.push(function (service) {
-        service.before(hooks.populateHeader(config));
-      });
-    }
   };
-};
-
-var _feathersErrors = require('feathers-errors');
-
-var _feathersErrors2 = _interopRequireDefault(_feathersErrors);
-
-var _hooks = require('./hooks');
-
-var hooks = _interopRequireWildcard(_hooks);
-
-var _utils = require('./utils');
-
-function _interopRequireWildcard(obj) { if (obj && obj.__esModule) { return obj; } else { var newObj = {}; if (obj != null) { for (var key in obj) { if (Object.prototype.hasOwnProperty.call(obj, key)) newObj[key] = obj[key]; } } newObj.default = obj; return newObj; } }
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-var defaults = {
-  cookie: 'feathers-jwt',
-  tokenKey: 'feathers-jwt',
-  localEndpoint: '/auth/local',
-  tokenEndpoint: '/auth/token'
-};
-
+}
 module.exports = exports['default'];
-},{"./hooks":5,"./utils":7,"feathers-errors":12}],7:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-exports.connected = connected;
-exports.authenticateSocket = authenticateSocket;
-exports.logoutSocket = logoutSocket;
-exports.getCookie = getCookie;
-exports.clearCookie = clearCookie;
-exports.getJWT = getJWT;
-exports.getStorage = getStorage;
-// Returns a promise that resolves when the socket is connected
-function connected(app) {
-  return new Promise(function (resolve, reject) {
-    if (app.rest) {
-      return resolve();
-    }
+exports.default = populateHeader;
 
-    var socket = app.io || app.primus;
+function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
 
-    if (!socket) {
-      return reject(new Error('It looks like no client connection has been configured.'));
-    }
+/*
+ * Sets the access token in the authorization header
+ * under hook.params.header so that it can be picked
+ * up by the client side REST libraries.
+ */
 
-    // If one of those events happens before `connect` the promise will be rejected
-    // If it happens after, it will do nothing (since Promises can only resolve once)
-    socket.once('disconnect', reject);
-    socket.once('close', reject);
+function populateHeader() {
+  var options = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
 
-    // If the socket is not connected yet we have to wait for the `connect` event
-    if (app.io && !socket.connected || app.primus && socket.readyState !== 3) {
-      var connectEvent = app.primus ? 'open' : 'connect';
-      socket.once(connectEvent, function () {
-        return resolve(socket);
-      });
-    } else {
-      resolve(socket);
-    }
-  });
-}
-
-// Returns a promise that authenticates a socket
-function authenticateSocket(options, socket, method) {
-  return new Promise(function (resolve, reject) {
-    socket.once('unauthorized', reject);
-    socket.once('authenticated', resolve);
-
-    socket[method]('authenticate', options);
-  });
-}
-
-// Returns a promise that de-authenticates a socket
-function logoutSocket(socket, method) {
-  return new Promise(function (resolve, reject) {
-    socket[method]('logout', function (error) {
-      if (error) {
-        reject(error);
-      }
-
-      resolve();
-    });
-  });
-}
-
-// Returns the value for a cookie
-function getCookie(name) {
-  if (typeof document !== 'undefined') {
-    var value = '; ' + document.cookie;
-    var parts = value.split('; ' + name + '=');
-
-    if (parts.length === 2) {
-      return parts.pop().split(';').shift();
-    }
+  if (!options.header) {
+    throw new Error('You need to pass \'options.header\' to the populateHeader() hook.');
   }
 
-  return null;
-}
-
-// Returns the value for a cookie
-function clearCookie(name) {
-  if (typeof document !== 'undefined') {
-    document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:01 GMT;';
-  }
-
-  return null;
-}
-
-// Tries the JWT from the given key either from a storage or the cookie
-function getJWT(tokenKey, cookieKey, storage) {
-  return Promise.resolve(storage.getItem(tokenKey)).then(function (jwt) {
-    var cookieToken = getCookie(cookieKey);
-
-    if (cookieToken) {
-      return cookieToken;
+  return function (hook) {
+    if (hook.type !== 'before') {
+      return Promise.reject(new Error('The \'populateHeader\' hook should only be used as a \'before\' hook.'));
     }
 
-    return jwt;
-  });
-}
-
-// Returns a storage implementation
-function getStorage(storage) {
-  if (storage) {
-    return storage;
-  }
-
-  return {
-    store: {},
-    getItem: function getItem(key) {
-      return this.store[key];
-    },
-    setItem: function setItem(key, value) {
-      return this.store[key] = value;
-    },
-    removeItem: function removeItem(key) {
-      delete this.store[key];
-      return this;
+    if (hook.params.accessToken) {
+      hook.params.headers = Object.assign({}, _defineProperty({}, options.header, options.prefix ? options.prefix + ' ' + hook.params.accessToken : hook.params.accessToken), hook.params.headers);
     }
+
+    return Promise.resolve(hook);
   };
 }
+module.exports = exports['default'];
 },{}],8:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
+exports.default = init;
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+var _index = require('./hooks/index');
 
+var _index2 = _interopRequireDefault(_index);
+
+var _passport = require('./passport');
+
+var _passport2 = _interopRequireDefault(_passport);
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+var defaults = {
+  header: 'authorization',
+  cookie: 'feathers-jwt',
+  storageKey: 'feathers-jwt',
+  jwtStrategy: 'jwt',
+  path: '/authentication',
+  entity: 'user',
+  service: 'users'
+};
+
+function init() {
+  var config = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+  var options = Object.assign({}, defaults, config);
+
+  return function () {
+    var app = this;
+
+    app.passport = new _passport2.default(app, options);
+    app.authenticate = app.passport.authenticate.bind(app.passport);
+    app.logout = app.passport.logout.bind(app.passport);
+
+    // Set up hook that adds token and user to params so that
+    // it they can be accessed by client side hooks and services
+    app.mixins.push(function (service) {
+      // if (typeof service.hooks !== 'function') {
+      if (typeof service.before !== 'function' || typeof service.after !== 'function') {
+        throw new Error('It looks like feathers-hooks isn\'t configured. It is required before running feathers-authentication.');
+      }
+
+      service.before(_index2.default.populateAccessToken(options));
+    });
+
+    // Set up hook that adds authorization header for REST provider
+    if (app.rest) {
+      app.mixins.push(function (service) {
+        service.before(_index2.default.populateHeader(options));
+      });
+    }
+  };
+}
+
+init.defaults = defaults;
+module.exports = exports['default'];
+},{"./hooks/index":4,"./passport":9}],9:[function(require,module,exports){
+'use strict';
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+
+var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+var _feathersErrors = require('feathers-errors');
+
+var _feathersErrors2 = _interopRequireDefault(_feathersErrors);
+
+var _jwtDecode = require('jwt-decode');
+
+var _jwtDecode2 = _interopRequireDefault(_jwtDecode);
+
+var _debug = require('debug');
+
+var _debug2 = _interopRequireDefault(_debug);
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+var debug = (0, _debug2.default)('feathers-authentication-client');
+
+var Passport = function () {
+  function Passport(app, options) {
+    _classCallCheck(this, Passport);
+
+    if (app.passport) {
+      throw new Error('You have already registered authentication on this client app instance. You only need to do it once.');
+    }
+
+    this.options = options;
+    this.app = app;
+    this.storage = app.get('storage') || this.getStorage(options.storage);
+
+    this.setJWT = this.setJWT.bind(this);
+
+    app.set('storage', this.storage);
+    this.getJWT().then(this.setJWT);
+
+    this.setupSocketListeners();
+  }
+
+  _createClass(Passport, [{
+    key: 'setupSocketListeners',
+    value: function setupSocketListeners() {
+      var _this = this;
+
+      var app = this.app;
+      var socket = app.io || app.primus;
+      var emit = app.io ? 'emit' : 'send';
+      var reconnected = app.io ? 'reconnect' : 'reconnected';
+
+      if (!socket) {
+        return;
+      }
+
+      socket.on(reconnected, function () {
+        debug('Socket reconnected');
+
+        // If socket was already authenticated then re-authenticate
+        // it with the server automatically.
+        if (socket.authenticated) {
+          var data = {
+            strategy: _this.options.jwtStrategy,
+            accessToken: app.get('accessToken')
+          };
+          _this.authenticateSocket(data, socket, emit).then(_this.setJWT).catch(function (error) {
+            debug('Error re-authenticating after socket reconnect', error);
+            socket.authenticated = false;
+            app.emit('reauthentication-error', error);
+          });
+        }
+      });
+
+      if (socket.io) {
+        socket.io.engine.on('upgrade', function () {
+          debug('Socket upgrading');
+
+          // If socket was already authenticated then re-authenticate
+          // it with the server automatically.
+          if (socket.authenticated) {
+            var data = {
+              strategy: _this.options.jwtStrategy,
+              accessToken: app.get('accessToken')
+            };
+
+            _this.authenticateSocket(data, socket, emit).then(_this.setJWT).catch(function (error) {
+              debug('Error re-authenticating after socket upgrade', error);
+              socket.authenticated = false;
+              app.emit('reauthentication-error', error);
+            });
+          }
+        });
+      }
+    }
+  }, {
+    key: 'connected',
+    value: function connected() {
+      var app = this.app;
+
+      if (app.rest) {
+        return Promise.resolve();
+      }
+
+      var socket = app.io || app.primus;
+
+      if (!socket) {
+        return Promise.reject(new Error('It looks like your client connection has not been configured.'));
+      }
+
+      if (app.io && socket.connected || app.primus && socket.readyState === 3) {
+        debug('Socket already connected');
+        return Promise.resolve(socket);
+      }
+
+      return new Promise(function (resolve, reject) {
+        var connected = app.primus ? 'open' : 'connect';
+        var disconnect = app.io ? 'disconnect' : 'end';
+        debug('Waiting for socket connection');
+
+        var handleDisconnect = function handleDisconnect() {
+          debug('Socket disconnected before it could connect');
+          socket.authenticated = false;
+        };
+
+        // If disconnect happens before `connect` the promise will be rejected.
+        socket.once(disconnect, handleDisconnect);
+        socket.once(connected, function () {
+          debug('Socket connected');
+          debug('Removing ' + disconnect + ' listener');
+          socket.removeListener(disconnect, handleDisconnect);
+          resolve(socket);
+        });
+      });
+    }
+  }, {
+    key: 'authenticate',
+    value: function authenticate() {
+      var _this2 = this;
+
+      var credentials = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+
+      var app = this.app;
+      var getCredentials = Promise.resolve(credentials);
+
+      // If no strategy was given let's try to authenticate with a stored JWT
+      if (!credentials.strategy) {
+        if (credentials.accessToken) {
+          credentials.strategy = this.options.jwtStrategy;
+        } else {
+          getCredentials = this.getJWT().then(function (accessToken) {
+            if (!accessToken) {
+              return Promise.reject(new _feathersErrors2.default.NotAuthenticated('Could not find stored JWT and no authentication strategy was given'));
+            }
+            return { strategy: _this2.options.jwtStrategy, accessToken: accessToken };
+          });
+        }
+      }
+
+      return getCredentials.then(function (credentials) {
+        return _this2.connected(app).then(function (socket) {
+          if (app.rest) {
+            return app.service(_this2.options.path).create(credentials).then(_this2.setJWT);
+          }
+
+          var emit = app.io ? 'emit' : 'send';
+          return _this2.authenticateSocket(credentials, socket, emit).then(_this2.setJWT);
+        });
+      });
+    }
+
+    // Returns a promise that authenticates a socket
+
+  }, {
+    key: 'authenticateSocket',
+    value: function authenticateSocket(credentials, socket, emit) {
+      return new Promise(function (resolve, reject) {
+        debug('Attempting to authenticate socket');
+        socket[emit]('authenticate', credentials, function (error, data) {
+          if (error) {
+            return reject(error);
+          }
+
+          socket.authenticated = true;
+          debug('Socket authenticated!');
+
+          resolve(data);
+        });
+      });
+    }
+  }, {
+    key: 'logoutSocket',
+    value: function logoutSocket(socket, emit) {
+      return new Promise(function (resolve, reject) {
+        socket[emit]('logout', function (error) {
+          if (error) {
+            reject(error);
+          }
+
+          socket.authenticated = false;
+          resolve();
+        });
+      });
+    }
+  }, {
+    key: 'logout',
+    value: function logout() {
+      var _this3 = this;
+
+      var app = this.app;
+
+      app.set('accessToken', null);
+      this.clearCookie(this.options.cookie);
+
+      // remove the accessToken from localStorage
+      return Promise.resolve(app.get('storage').removeItem(this.options.storageKey)).then(function () {
+        // If using sockets de-authenticate the socket
+        if (app.io || app.primus) {
+          var method = app.io ? 'emit' : 'send';
+          var socket = app.io ? app.io : app.primus;
+
+          return _this3.logoutSocket(socket, method);
+        }
+      });
+    }
+  }, {
+    key: 'setJWT',
+    value: function setJWT(data) {
+      var accessToken = data && data.accessToken ? data.accessToken : data;
+
+      if (accessToken) {
+        this.app.set('accessToken', accessToken);
+        this.app.get('storage').setItem(this.options.storageKey, accessToken);
+      }
+
+      return Promise.resolve(data);
+    }
+  }, {
+    key: 'getJWT',
+    value: function getJWT() {
+      var _this4 = this;
+
+      var app = this.app;
+      return new Promise(function (resolve) {
+        var accessToken = app.get('accessToken');
+
+        if (accessToken) {
+          return resolve(accessToken);
+        }
+
+        return Promise.resolve(_this4.storage.getItem(_this4.options.storageKey)).then(function (jwt) {
+          var token = jwt || _this4.getCookie(_this4.options.cookie);
+
+          if (token && token !== 'null' && !_this4.payloadIsValid((0, _jwtDecode2.default)(token))) {
+            token = undefined;
+          }
+
+          return resolve(token);
+        });
+      });
+    }
+
+    // Pass a jwt token, get back a payload if it's valid.
+
+  }, {
+    key: 'verifyJWT',
+    value: function verifyJWT(token) {
+      if (typeof token !== 'string') {
+        return Promise.reject(new Error('Token provided to verifyJWT is missing or not a string'));
+      }
+
+      try {
+        var payload = (0, _jwtDecode2.default)(token);
+
+        if (this.payloadIsValid(payload)) {
+          return Promise.resolve(payload);
+        }
+
+        return Promise.reject(new Error('Invalid token: expired'));
+      } catch (error) {
+        return Promise.reject(new Error('Cannot decode malformed token.'));
+      }
+    }
+
+    // Pass a decoded payload and it will return a boolean based on if it hasn't expired.
+
+  }, {
+    key: 'payloadIsValid',
+    value: function payloadIsValid(payload) {
+      return payload && payload.exp * 1000 > new Date().getTime();
+    }
+  }, {
+    key: 'getCookie',
+    value: function getCookie(name) {
+      if (typeof document !== 'undefined') {
+        var value = '; ' + document.cookie;
+        var parts = value.split('; ' + name + '=');
+
+        if (parts.length === 2) {
+          return parts.pop().split(';').shift();
+        }
+      }
+
+      return null;
+    }
+  }, {
+    key: 'clearCookie',
+    value: function clearCookie(name) {
+      if (typeof document !== 'undefined') {
+        document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:01 GMT;';
+      }
+
+      return null;
+    }
+
+    // Returns a storage implementation
+
+  }, {
+    key: 'getStorage',
+    value: function getStorage(storage) {
+      if (storage) {
+        return storage;
+      }
+
+      return {
+        store: {},
+        getItem: function getItem(key) {
+          return this.store[key];
+        },
+        setItem: function setItem(key, value) {
+          return this.store[key] = value;
+        },
+        removeItem: function removeItem(key) {
+          delete this.store[key];
+          return this;
+        }
+      };
+    }
+  }]);
+
+  return Passport;
+}();
+
+exports.default = Passport;
+module.exports = exports['default'];
+},{"debug":1,"feathers-errors":14,"jwt-decode":53}],10:[function(require,module,exports){
+'use strict';
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
 exports.default = getArguments;
+
+function _typeof(obj) { return obj && typeof Symbol !== "undefined" && obj.constructor === Symbol ? "symbol" : typeof obj; }
+
 var noop = exports.noop = function noop() {};
 var getCallback = function getCallback(args) {
   var last = args[args.length - 1];
@@ -1060,7 +1336,6 @@ var converters = exports.converters = {
     return [data, params, callback];
   },
 
-
   update: updateOrPatch('update'),
 
   patch: updateOrPatch('patch'),
@@ -1073,7 +1348,7 @@ var converters = exports.converters = {
 function getArguments(method, args) {
   return converters[method](args);
 }
-},{}],9:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -1116,18 +1391,18 @@ exports.default = {
   merge: _utils.merge
 };
 module.exports = exports['default'];
-},{"./arguments":8,"./hooks":10,"./utils":11}],10:[function(require,module,exports){
+},{"./arguments":10,"./hooks":12,"./utils":13}],12:[function(require,module,exports){
 'use strict';
+
+var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
 
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
-
-var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
-
 var _utils = require('./utils');
+
+function _typeof(obj) { return obj && typeof Symbol !== "undefined" && obj.constructor === Symbol ? "symbol" : typeof obj; }
 
 function getOrRemove(args) {
   return {
@@ -1167,7 +1442,7 @@ var converters = {
 };
 
 function hookObject(method, type, args) {
-  var app = arguments.length > 3 && arguments[3] !== undefined ? arguments[3] : {};
+  var app = arguments.length <= 3 || arguments[3] === undefined ? {} : arguments[3];
 
   var hook = converters[method](args);
 
@@ -1244,18 +1519,15 @@ exports.default = {
   convertHookData: convertHookData
 };
 module.exports = exports['default'];
-},{"./utils":11}],11:[function(require,module,exports){
+},{"./utils":13}],13:[function(require,module,exports){
 (function (process){
 'use strict';
+
+var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
 
 Object.defineProperty(exports, "__esModule", {
   value: true
 });
-
-var _extends = Object.assign || function (target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i]; for (var key in source) { if (Object.prototype.hasOwnProperty.call(source, key)) { target[key] = source[key]; } } } return target; };
-
-var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
-
 exports.stripSlashes = stripSlashes;
 exports.each = each;
 exports.some = some;
@@ -1275,6 +1547,8 @@ exports.sorter = sorter;
 exports.makeUrl = makeUrl;
 
 function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
+
+function _typeof(obj) { return obj && typeof Symbol !== "undefined" && obj.constructor === Symbol ? "symbol" : typeof obj; }
 
 function _toConsumableArray(arr) { if (Array.isArray(arr)) { for (var i = 0, arr2 = Array(arr.length); i < arr.length; i++) { arr2[i] = arr[i]; } return arr2; } else { return Array.from(arr); } }
 
@@ -1468,7 +1742,7 @@ function matcher(originalQuery) {
     }
 
     return _.every(query, function (value, key) {
-      if ((typeof value === 'undefined' ? 'undefined' : _typeof(value)) === 'object') {
+      if (value !== null && (typeof value === 'undefined' ? 'undefined' : _typeof(value)) === 'object') {
         return _.every(value, function (target, filterType) {
           if (specialFilters[filterType]) {
             var filter = specialFilters[filterType](key, target);
@@ -1505,7 +1779,7 @@ function sorter($sort) {
 }
 
 function makeUrl(path) {
-  var app = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : {};
+  var app = arguments.length <= 1 || arguments[1] === undefined ? {} : arguments[1];
 
   var get = typeof app.get === 'function' ? app.get.bind(app) : function () {};
   var env = get('env') || process.env.NODE_ENV;
@@ -1519,7 +1793,7 @@ function makeUrl(path) {
   return protocol + '://' + host + port + '/' + stripSlashes(path);
 }
 }).call(this,require('_process'))
-},{"_process":53}],12:[function(require,module,exports){
+},{"_process":55}],14:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -1899,7 +2173,7 @@ exports.default = _extends({
   errors: errors
 }, errors);
 module.exports = exports['default'];
-},{"debug":1}],13:[function(require,module,exports){
+},{"debug":1}],15:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -1911,7 +2185,7 @@ exports.pluckQuery = pluckQuery;
 exports.remove = remove;
 exports.pluck = pluck;
 exports.disable = disable;
-exports.populate = populate;
+exports.legacyPopulate = legacyPopulate;
 
 var _utils = require('./utils');
 
@@ -2312,7 +2586,7 @@ function pluck() {
  * Disable access to a service method completely, for a specific provider,
  * or for a custom condition.
  *
- * @param {?string|function} realm - Provider, or function(hook):boolean|Promise
+ * @param {string|function} [realm] - Provider, or function(hook):boolean|Promise
  *    The first provider or the custom condition.
  *    null = disable completely,
  *    'external' = disable external access,
@@ -2385,7 +2659,7 @@ function disable(realm) {
  *
  * 'options.field' is the foreign key for one related item in options.service, i.e. item[options.field] === foreignItem[idField].
  * 'target' is set to this related item once it is read successfully.
- * 
+ *
  * If 'options.field' is not present in the hook result item, the hook is ignored.
  *
  * So if the hook result has the message item
@@ -2400,8 +2674,10 @@ function disable(realm) {
  *
  * If 'senderId' is an array of keys, then 'sender' will be an array of populated items.
  */
-function populate(target, options) {
+function legacyPopulate(target, options) {
   options = Object.assign({}, options);
+
+  console.error('Calling populate(target, options) is now DEPRECATED and will be removed in the future. ' + 'Refer to docs.feathersjs.com for more information. (legacyPopulate)');
 
   if (!options.service) {
     throw new Error('You need to provide a service. (populate)');
@@ -2467,7 +2743,206 @@ function populate(target, options) {
     });
   };
 }
-},{"./utils":14,"feathers-errors":12}],14:[function(require,module,exports){
+},{"./utils":17,"feathers-errors":14}],16:[function(require,module,exports){
+(function (process){
+'use strict';
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+exports.populate = undefined;
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+var _feathersErrors = require('feathers-errors');
+
+var _feathersErrors2 = _interopRequireDefault(_feathersErrors);
+
+var _utils = require('./utils');
+
+var _bundled = require('./bundled');
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
+
+function _toConsumableArray(arr) { if (Array.isArray(arr)) { for (var i = 0, arr2 = Array(arr.length); i < arr.length; i++) { arr2[i] = arr[i]; } return arr2; } else { return Array.from(arr); } }
+
+var populate = exports.populate = function populate(options) {
+  for (var _len = arguments.length, rest = Array(_len > 1 ? _len - 1 : 0), _key = 1; _key < _len; _key++) {
+    rest[_key - 1] = arguments[_key];
+  }
+
+  if (typeof options === 'string') {
+    return _bundled.legacyPopulate.apply(undefined, [options].concat(rest));
+  }
+
+  return function (hook) {
+    var optionsDefault = {
+      schema: {},
+      checkPermissions: function checkPermissions() {
+        return true;
+      },
+      profile: false
+    };
+
+    if (hook.params._populate === 'skip') {
+      // this service call made from another populate
+      return hook;
+    }
+
+    return Promise.resolve().then(function () {
+      // 'options.schema' resolves to { permissions: '...', include: [ ... ] }
+
+      var items = (0, _utils.getItems)(hook);
+      var options1 = Object.assign({}, optionsDefault, options);
+      var schema = options1.schema,
+          checkPermissions = options1.checkPermissions;
+
+      var schema1 = typeof schema === 'function' ? schema(hook, options1) : schema;
+      var permissions = schema1.permissions || null;
+
+      if (typeof checkPermissions !== 'function') {
+        throw new _feathersErrors2.default.BadRequest('Permissions param is not a function. (populate)');
+      }
+
+      if (permissions && !checkPermissions(hook, hook.path, permissions, 0)) {
+        throw new _feathersErrors2.default.BadRequest('Permissions do not allow this populate. (populate)');
+      }
+
+      if ((typeof schema1 === 'undefined' ? 'undefined' : _typeof(schema1)) !== 'object') {
+        throw new _feathersErrors2.default.BadRequest('Schema does not resolve to an object. (populate)');
+      }
+
+      return !schema1.include || !Object.keys(schema1.include).length ? items : populateItemArray(options1, hook, items, schema1.include, 0);
+    }).then(function (items) {
+      (0, _utils.replaceItems)(hook, items);
+      return hook;
+    });
+  };
+};
+
+function populateItemArray(options, hook, items, includeSchema, depth) {
+  // 'items' is an item or an array of items
+  // 'includeSchema' is like [ { nameAs: 'author', ... }, { nameAs: 'readers', ... } ]
+
+  if (!Array.isArray(items)) {
+    return populateItem(options, hook, items, includeSchema, depth + 1);
+  }
+
+  return Promise.all(items.map(function (item) {
+    return populateItem(options, hook, item, includeSchema, depth + 1);
+  }));
+}
+
+function populateItem(options, hook, item, includeSchema, depth) {
+  // 'item' is one item
+  // 'includeSchema' is like [ { nameAs: 'author', ... }, { nameAs: 'readers', ... } ]
+
+  var elapsed = {};
+  var startAtAllIncludes = process.hrtime();
+  item._include = [];
+
+  return Promise.all(includeSchema.map(function (childSchema) {
+    var startAtThisInclude = process.hrtime();
+    return populateAddChild(options, hook, item, childSchema, depth).then(function (result) {
+      var nameAs = childSchema.nameAs || childSchema.service;
+      elapsed[nameAs] = getElapsed(options, startAtThisInclude, depth);
+
+      return result;
+    });
+  })).then(function (children) {
+    // 'children' is like [{ authorInfo: {...}, readersInfo: [{...}, {...}] }]
+    if (options.profile !== false) {
+      elapsed.total = getElapsed(options, startAtAllIncludes, depth);
+      item._elapsed = elapsed;
+    }
+
+    return Object.assign.apply(Object, [item].concat(_toConsumableArray(children)));
+  });
+}
+
+function populateAddChild(options, hook, parentItem, childSchema, depth) {
+  /*
+  'parentItem' is the item we are adding children to
+  'childSchema' is like
+    { service: 'comments',
+      permissions: '...',
+      nameAs: 'comments',
+      asArray: true,
+      parentField: 'id',
+      childField: 'postId',
+      query: { $limit: 5, $select: ['title', 'content', 'postId'], $sort: { createdAt: -1 } },
+      select: (hook, parent, depth) => ({ something: { $exists: false }}),
+      include: [ ... ],
+    }
+  */
+
+  // note: parentField & childField are req'd, plus parentItem[parentField} !== undefined .
+  // childSchema.select may override their relationship but some relationship must be given.
+  if (!childSchema.service || !childSchema.parentField || !childSchema.childField) {
+    throw new _feathersErrors2.default.BadRequest('Child schema is missing a required property. (populate)');
+  }
+
+  if (childSchema.permissions && !options.checkPermissions(hook, childSchema.service, childSchema.permissions, depth)) {
+    throw new _feathersErrors2.default.BadRequest('Permissions for ' + childSchema.service + ' do not allow include. (populate)');
+  }
+
+  var nameAs = childSchema.nameAs || childSchema.service;
+  parentItem._include.push(nameAs);
+
+  var promise = Promise.resolve().then(function () {
+    return childSchema.select ? childSchema.select(hook, parentItem, depth) : {};
+  }).then(function (selectQuery) {
+    var parentVal = (0, _utils.getByDot)(parentItem, childSchema.parentField);
+
+    if (parentVal === undefined) {
+      throw new _feathersErrors2.default.BadRequest('ParentField ' + childSchema.parentField + ' for ' + nameAs + ' depth ' + depth + ' is undefined. (populate)');
+    }
+
+    var query = Object.assign({}, childSchema.query, _defineProperty({}, childSchema.childField, Array.isArray(parentVal) ? { $in: parentVal } : parentVal), selectQuery // dynamic options override static ones
+    );
+
+    var serviceHandle = hook.app.service(childSchema.service);
+
+    if (!serviceHandle) {
+      throw new _feathersErrors2.default.BadRequest('Service ' + childSchema.service + ' is not configured. (populate)');
+    }
+
+    return serviceHandle.find({ query: query, _populate: 'skip' });
+  }).then(function (result) {
+    result = result.data || result;
+
+    if (result.length === 1 && !childSchema.asArray) {
+      result = result[0];
+    }
+
+    return result;
+  });
+
+  if (childSchema.include) {
+    promise = promise.then(function (items) {
+      return populateItemArray(options, hook, items, childSchema.include, depth);
+    });
+  }
+
+  return promise.then(function (items) {
+    return _defineProperty({}, nameAs, items);
+  });
+}
+
+// Helpers
+
+function getElapsed(options, startHrtime, depth) {
+  if (options.profile === true) {
+    var elapsed = process.hrtime(startHrtime);
+    return elapsed[0] * 1e9 + elapsed[1];
+  } else if (options.profile !== false) {
+    return depth; // for testing _elapsed
+  }
+}
+}).call(this,require('_process'))
+},{"./bundled":15,"./utils":17,"_process":55,"feathers-errors":14}],17:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -2475,11 +2950,6 @@ Object.defineProperty(exports, "__esModule", {
 });
 
 var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
-
-exports.setByDot = setByDot;
-exports.checkContext = checkContext;
-exports.getItems = getItems;
-exports.replaceItems = replaceItems;
 
 /* eslint no-param-reassign: 0 */
 
@@ -2493,6 +2963,10 @@ exports.replaceItems = replaceItems;
  * There is no way to differentiate between non-existent paths and a value of undefined
  */
 var getByDot = exports.getByDot = function getByDot(obj, path) {
+  if (path.indexOf('.') === -1) {
+    return obj[path];
+  }
+
   return path.split('.').reduce(function (obj1, part) {
     return (typeof obj1 === 'undefined' ? 'undefined' : _typeof(obj1)) === 'object' ? obj1[part] : undefined;
   }, obj);
@@ -2511,7 +2985,17 @@ var getByDot = exports.getByDot = function getByDot(obj, path) {
  * new empty inner objects will still be created,
  * e.g. setByDot({}, 'a.b.c', undefined, true) will return {a: b: {} }
  */
-function setByDot(obj, path, value, ifDelete) {
+var setByDot = exports.setByDot = function setByDot(obj, path, value, ifDelete) {
+  if (path.indexOf('.') === -1) {
+    obj[path] = value;
+
+    if (value === undefined && ifDelete) {
+      delete obj[path];
+    }
+
+    return;
+  }
+
   var parts = path.split('.');
   var lastIndex = parts.length - 1;
   return parts.reduce(function (obj1, part, i) {
@@ -2528,7 +3012,7 @@ function setByDot(obj, path, value, ifDelete) {
     }
     return obj1;
   }, obj);
-}
+};
 
 /**
  * Restrict the calling hook to a hook type (before, after) and a set of
@@ -2557,7 +3041,7 @@ function setByDot(obj, path, value, ifDelete) {
  * checkContext(hook, 'before');
  */
 
-function checkContext(hook) {
+var checkContext = exports.checkContext = function checkContext(hook) {
   var type = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : null;
   var methods = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : [];
   var label = arguments.length > 3 && arguments[3] !== undefined ? arguments[3] : 'anonymous';
@@ -2576,7 +3060,7 @@ function checkContext(hook) {
     var msg = JSON.stringify(myMethods);
     throw new Error('The \'' + label + '\' hook can only be used on the \'' + msg + '\' service method(s).');
   }
-}
+};
 
 /**
  * Return the data items in a hook.
@@ -2587,10 +3071,10 @@ function checkContext(hook) {
  * @param {Object} hook - The hook.
  * @returns {Object|Array.<Object>} The data item or array of data items
  */
-function getItems(hook) {
+var getItems = exports.getItems = function getItems(hook) {
   var items = hook.type === 'before' ? hook.data : hook.result;
   return items && hook.method === 'find' ? items.data || items : items;
-}
+};
 
 /**
  * Replace the data items in a hook. Companion to getItems.
@@ -2601,7 +3085,7 @@ function getItems(hook) {
  * If you update an after find paginated hook with an item rather than an array of items,
  * the hook will have an array consisting of that one item.
  */
-function replaceItems(hook, items) {
+var replaceItems = exports.replaceItems = function replaceItems(hook, items) {
   if (hook.type === 'before') {
     hook.data = items;
   } else if (hook.method === 'find' && hook.result && hook.result.data) {
@@ -2615,8 +3099,8 @@ function replaceItems(hook, items) {
   } else {
     hook.result = items;
   }
-}
-},{}],15:[function(require,module,exports){
+};
+},{}],18:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -2754,7 +3238,7 @@ function baseMixin(methods) {
 
   return Object.assign.apply(Object, [mixin].concat(objs));
 }
-},{"feathers-commons":9}],16:[function(require,module,exports){
+},{"feathers-commons":11}],19:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -2766,6 +3250,8 @@ var _uberproto = require('uberproto');
 var _uberproto2 = _interopRequireDefault(_uberproto);
 
 var _feathersCommons = require('feathers-commons');
+
+var _populate = require('feathers-hooks-common/lib/populate');
 
 var _bundled = require('feathers-hooks-common/lib/bundled');
 
@@ -2918,15 +3404,15 @@ configure.lowerCase = _bundled.lowerCase;
 configure.remove = _bundled.remove;
 configure.pluck = _bundled.pluck;
 configure.disable = _bundled.disable;
-configure.populate = _bundled.populate;
+configure.populate = _populate.populate;
 configure.removeField = _bundled.removeField;
 
 exports.default = configure;
 module.exports = exports['default'];
-},{"./commons":15,"feathers-commons":9,"feathers-hooks-common/lib/bundled":13,"uberproto":60}],17:[function(require,module,exports){
+},{"./commons":18,"feathers-commons":11,"feathers-hooks-common/lib/bundled":15,"feathers-hooks-common/lib/populate":16,"uberproto":62}],20:[function(require,module,exports){
 module.exports = require('./lib/client');
 
-},{"./lib/client":18}],18:[function(require,module,exports){
+},{"./lib/client":21}],21:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -2968,9 +3454,10 @@ var _client2 = _interopRequireDefault(_client);
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 module.exports = exports['default'];
-},{"feathers-socket-commons/client":30}],19:[function(require,module,exports){
-arguments[4][4][0].apply(exports,arguments)
-},{"./lib/client/index":22,"dup":4}],20:[function(require,module,exports){
+},{"feathers-socket-commons/client":33}],22:[function(require,module,exports){
+module.exports = require('./lib/client/index');
+
+},{"./lib/client/index":25}],23:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3113,7 +3600,7 @@ var Base = function () {
 
 exports.default = Base;
 module.exports = exports['default'];
-},{"feathers-commons":27,"feathers-errors":12,"qs":54}],21:[function(require,module,exports){
+},{"feathers-commons":30,"feathers-errors":14,"qs":56}],24:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3187,7 +3674,7 @@ var Service = function (_Base) {
 
 exports.default = Service;
 module.exports = exports['default'];
-},{"./base":20}],22:[function(require,module,exports){
+},{"./base":23}],25:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3258,7 +3745,7 @@ var transports = {
 };
 
 module.exports = exports['default'];
-},{"./fetch":21,"./jquery":23,"./request":24,"./superagent":25}],23:[function(require,module,exports){
+},{"./fetch":24,"./jquery":26,"./request":27,"./superagent":28}],26:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3332,7 +3819,7 @@ var Service = function (_Base) {
 
 exports.default = Service;
 module.exports = exports['default'];
-},{"./base":20}],24:[function(require,module,exports){
+},{"./base":23}],27:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3398,7 +3885,7 @@ var Service = function (_Base) {
 
 exports.default = Service;
 module.exports = exports['default'];
-},{"./base":20}],25:[function(require,module,exports){
+},{"./base":23}],28:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3462,9 +3949,107 @@ var Service = function (_Base) {
 
 exports.default = Service;
 module.exports = exports['default'];
-},{"./base":20}],26:[function(require,module,exports){
-arguments[4][8][0].apply(exports,arguments)
-},{"dup":8}],27:[function(require,module,exports){
+},{"./base":23}],29:[function(require,module,exports){
+'use strict';
+
+Object.defineProperty(exports, "__esModule", {
+  value: true
+});
+
+var _typeof = typeof Symbol === "function" && typeof Symbol.iterator === "symbol" ? function (obj) { return typeof obj; } : function (obj) { return obj && typeof Symbol === "function" && obj.constructor === Symbol && obj !== Symbol.prototype ? "symbol" : typeof obj; };
+
+exports.default = getArguments;
+var noop = exports.noop = function noop() {};
+var getCallback = function getCallback(args) {
+  var last = args[args.length - 1];
+  return typeof last === 'function' ? last : noop;
+};
+var getParams = function getParams(args, position) {
+  return _typeof(args[position]) === 'object' ? args[position] : {};
+};
+
+var updateOrPatch = function updateOrPatch(name) {
+  return function (args) {
+    var id = args[0];
+    var data = args[1];
+    var callback = getCallback(args);
+    var params = getParams(args, 2);
+
+    if (typeof id === 'function') {
+      throw new Error('First parameter for \'' + name + '\' can not be a function');
+    }
+
+    if ((typeof data === 'undefined' ? 'undefined' : _typeof(data)) !== 'object') {
+      throw new Error('No data provided for \'' + name + '\'');
+    }
+
+    if (args.length > 4) {
+      throw new Error('Too many arguments for \'' + name + '\' service method');
+    }
+
+    return [id, data, params, callback];
+  };
+};
+
+var getOrRemove = function getOrRemove(name) {
+  return function (args) {
+    var id = args[0];
+    var params = getParams(args, 1);
+    var callback = getCallback(args);
+
+    if (args.length > 3) {
+      throw new Error('Too many arguments for \'' + name + '\' service method');
+    }
+
+    if (typeof id === 'function') {
+      throw new Error('First parameter for \'' + name + '\' can not be a function');
+    }
+
+    return [id, params, callback];
+  };
+};
+
+var converters = exports.converters = {
+  find: function find(args) {
+    var callback = getCallback(args);
+    var params = getParams(args, 0);
+
+    if (args.length > 2) {
+      throw new Error('Too many arguments for \'find\' service method');
+    }
+
+    return [params, callback];
+  },
+  create: function create(args) {
+    var data = args[0];
+    var params = getParams(args, 1);
+    var callback = getCallback(args);
+
+    if ((typeof data === 'undefined' ? 'undefined' : _typeof(data)) !== 'object') {
+      throw new Error('First parameter for \'create\' must be an object');
+    }
+
+    if (args.length > 3) {
+      throw new Error('Too many arguments for \'create\' service method');
+    }
+
+    return [data, params, callback];
+  },
+
+
+  update: updateOrPatch('update'),
+
+  patch: updateOrPatch('patch'),
+
+  get: getOrRemove('get'),
+
+  remove: getOrRemove('remove')
+};
+
+function getArguments(method, args) {
+  return converters[method](args);
+}
+},{}],30:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3492,7 +4077,7 @@ exports.default = {
   sorter: _utils.sorter
 };
 module.exports = exports['default'];
-},{"./arguments":26,"./hooks":28,"./utils":29}],28:[function(require,module,exports){
+},{"./arguments":29,"./hooks":31,"./utils":32}],31:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3614,7 +4199,7 @@ exports.default = {
   convertHookData: convertHookData
 };
 module.exports = exports['default'];
-},{"./utils":29}],29:[function(require,module,exports){
+},{"./utils":32}],32:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3764,9 +4349,9 @@ function sorter($sort) {
     return comparator;
   };
 }
-},{}],30:[function(require,module,exports){
-arguments[4][17][0].apply(exports,arguments)
-},{"./lib/client":31,"dup":17}],31:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
+arguments[4][20][0].apply(exports,arguments)
+},{"./lib/client":34,"dup":20}],34:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -3939,7 +4524,7 @@ var Service = function () {
 
 exports.default = Service;
 module.exports = exports['default'];
-},{"./utils":32,"debug":1,"feathers-errors":12}],32:[function(require,module,exports){
+},{"./utils":35,"debug":1,"feathers-errors":14}],35:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -4000,17 +4585,17 @@ function normalizeError(e) {
   return result;
 }
 }).call(this,require('_process'))
-},{"_process":53,"feathers-commons":34}],33:[function(require,module,exports){
-arguments[4][8][0].apply(exports,arguments)
-},{"dup":8}],34:[function(require,module,exports){
-arguments[4][27][0].apply(exports,arguments)
-},{"./arguments":33,"./hooks":35,"./utils":36,"dup":27}],35:[function(require,module,exports){
-arguments[4][28][0].apply(exports,arguments)
-},{"./utils":36,"dup":28}],36:[function(require,module,exports){
+},{"_process":55,"feathers-commons":37}],36:[function(require,module,exports){
 arguments[4][29][0].apply(exports,arguments)
 },{"dup":29}],37:[function(require,module,exports){
-arguments[4][17][0].apply(exports,arguments)
-},{"./lib/client":38,"dup":17}],38:[function(require,module,exports){
+arguments[4][30][0].apply(exports,arguments)
+},{"./arguments":36,"./hooks":38,"./utils":39,"dup":30}],38:[function(require,module,exports){
+arguments[4][31][0].apply(exports,arguments)
+},{"./utils":39,"dup":31}],39:[function(require,module,exports){
+arguments[4][32][0].apply(exports,arguments)
+},{"dup":32}],40:[function(require,module,exports){
+arguments[4][20][0].apply(exports,arguments)
+},{"./lib/client":41,"dup":20}],41:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4056,9 +4641,9 @@ var _client2 = _interopRequireDefault(_client);
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 module.exports = exports['default'];
-},{"feathers-socket-commons/client":30}],39:[function(require,module,exports){
-arguments[4][4][0].apply(exports,arguments)
-},{"./lib/client/index":42,"dup":4}],40:[function(require,module,exports){
+},{"feathers-socket-commons/client":33}],42:[function(require,module,exports){
+arguments[4][22][0].apply(exports,arguments)
+},{"./lib/client/index":45,"dup":22}],43:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4100,7 +4685,7 @@ exports.default = {
   service: function service(location, _service) {
     var _this = this;
 
-    var options = arguments.length <= 2 || arguments[2] === undefined ? {} : arguments[2];
+    var options = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
 
     location = (0, _feathersCommons.stripSlashes)(location);
 
@@ -4141,8 +4726,8 @@ exports.default = {
     return this.services[location] = protoService;
   },
   use: function use(location) {
-    var service = void 0,
-        middleware = Array.from(arguments).slice(1).reduce(function (middleware, arg) {
+    var service = void 0;
+    var middleware = Array.from(arguments).slice(1).reduce(function (middleware, arg) {
       if (typeof arg === 'function') {
         middleware[service ? 'after' : 'before'].push(arg);
       } else if (!service) {
@@ -4210,7 +4795,7 @@ exports.default = {
   }
 };
 module.exports = exports['default'];
-},{"./mixins/index":45,"debug":1,"feathers-commons":49,"uberproto":60}],41:[function(require,module,exports){
+},{"./mixins/index":48,"debug":1,"feathers-commons":11,"uberproto":62}],44:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4264,7 +4849,7 @@ var _uberproto2 = _interopRequireDefault(_uberproto);
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 module.exports = exports['default'];
-},{"events":3,"uberproto":60}],42:[function(require,module,exports){
+},{"events":3,"uberproto":62}],45:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4288,7 +4873,7 @@ function createApplication() {
 
 createApplication.version = '2.0.1';
 module.exports = exports['default'];
-},{"../feathers":43,"./express":41}],43:[function(require,module,exports){
+},{"../feathers":46,"./express":44}],46:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4318,7 +4903,7 @@ function createApplication(app) {
   return app;
 }
 module.exports = exports['default'];
-},{"./application":40,"uberproto":60}],44:[function(require,module,exports){
+},{"./application":43,"uberproto":62}],47:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4396,7 +4981,7 @@ function upperCase(name) {
 }
 
 module.exports = exports['default'];
-},{"events":3,"feathers-commons":49,"rubberduck":58}],45:[function(require,module,exports){
+},{"events":3,"feathers-commons":11,"rubberduck":60}],48:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4417,7 +5002,7 @@ exports.default = function () {
 };
 
 module.exports = exports['default'];
-},{"./event":44,"./normalizer":46,"./promise":47}],46:[function(require,module,exports){
+},{"./event":47,"./normalizer":49,"./promise":50}],49:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4447,7 +5032,7 @@ exports.default = function (service) {
 var _feathersCommons = require('feathers-commons');
 
 module.exports = exports['default'];
-},{"feathers-commons":49}],47:[function(require,module,exports){
+},{"feathers-commons":11}],50:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -4491,15 +5076,97 @@ function wrapper() {
 }
 
 module.exports = exports['default'];
-},{}],48:[function(require,module,exports){
-arguments[4][8][0].apply(exports,arguments)
-},{"dup":8}],49:[function(require,module,exports){
-arguments[4][27][0].apply(exports,arguments)
-},{"./arguments":48,"./hooks":50,"./utils":51,"dup":27}],50:[function(require,module,exports){
-arguments[4][28][0].apply(exports,arguments)
-},{"./utils":51,"dup":28}],51:[function(require,module,exports){
-arguments[4][29][0].apply(exports,arguments)
-},{"dup":29}],52:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
+/**
+ * The code was extracted from:
+ * https://github.com/davidchambers/Base64.js
+ */
+
+var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
+
+function InvalidCharacterError(message) {
+  this.message = message;
+}
+
+InvalidCharacterError.prototype = new Error();
+InvalidCharacterError.prototype.name = 'InvalidCharacterError';
+
+function polyfill (input) {
+  var str = String(input).replace(/=+$/, '');
+  if (str.length % 4 == 1) {
+    throw new InvalidCharacterError("'atob' failed: The string to be decoded is not correctly encoded.");
+  }
+  for (
+    // initialize result and counters
+    var bc = 0, bs, buffer, idx = 0, output = '';
+    // get next character
+    buffer = str.charAt(idx++);
+    // character found in table? initialize bit storage and add its ascii value;
+    ~buffer && (bs = bc % 4 ? bs * 64 + buffer : buffer,
+      // and if not first of each 4 characters,
+      // convert the first 8 bits to one ascii character
+      bc++ % 4) ? output += String.fromCharCode(255 & bs >> (-2 * bc & 6)) : 0
+  ) {
+    // try to find character in table (0-63, not found => -1)
+    buffer = chars.indexOf(buffer);
+  }
+  return output;
+}
+
+
+module.exports = typeof window !== 'undefined' && window.atob && window.atob.bind(window) || polyfill;
+
+},{}],52:[function(require,module,exports){
+var atob = require('./atob');
+
+function b64DecodeUnicode(str) {
+  return decodeURIComponent(atob(str).replace(/(.)/g, function (m, p) {
+    var code = p.charCodeAt(0).toString(16).toUpperCase();
+    if (code.length < 2) {
+      code = '0' + code;
+    }
+    return '%' + code;
+  }));
+}
+
+module.exports = function(str) {
+  var output = str.replace(/-/g, "+").replace(/_/g, "/");
+  switch (output.length % 4) {
+    case 0:
+      break;
+    case 2:
+      output += "==";
+      break;
+    case 3:
+      output += "=";
+      break;
+    default:
+      throw "Illegal base64url string!";
+  }
+
+  try{
+    return b64DecodeUnicode(output);
+  } catch (err) {
+    return atob(output);
+  }
+};
+
+},{"./atob":51}],53:[function(require,module,exports){
+'use strict';
+
+var base64_url_decode = require('./base64_url_decode');
+
+module.exports = function (token,options) {
+  if (typeof token !== 'string') {
+    throw new Error('Invalid token specified');
+  }
+
+  options = options || {};
+  var pos = options.header === true ? 0 : 1;
+  return JSON.parse(base64_url_decode(token.split('.')[pos]));
+};
+
+},{"./base64_url_decode":52}],54:[function(require,module,exports){
 /**
  * Helpers.
  */
@@ -4650,7 +5317,7 @@ function plural(ms, n, name) {
   return Math.ceil(ms / n) + ' ' + name + 's'
 }
 
-},{}],53:[function(require,module,exports){
+},{}],55:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -4832,7 +5499,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],54:[function(require,module,exports){
+},{}],56:[function(require,module,exports){
 'use strict';
 
 var Stringify = require('./stringify');
@@ -4843,7 +5510,7 @@ module.exports = {
     parse: Parse
 };
 
-},{"./parse":55,"./stringify":56}],55:[function(require,module,exports){
+},{"./parse":57,"./stringify":58}],57:[function(require,module,exports){
 'use strict';
 
 var Utils = require('./utils');
@@ -5012,7 +5679,7 @@ module.exports = function (str, opts) {
     return Utils.compact(obj);
 };
 
-},{"./utils":57}],56:[function(require,module,exports){
+},{"./utils":59}],58:[function(require,module,exports){
 'use strict';
 
 var Utils = require('./utils');
@@ -5151,7 +5818,7 @@ module.exports = function (object, opts) {
     return keys.join(delimiter);
 };
 
-},{"./utils":57}],57:[function(require,module,exports){
+},{"./utils":59}],59:[function(require,module,exports){
 'use strict';
 
 var hexTable = (function () {
@@ -5317,7 +5984,7 @@ exports.isBuffer = function (obj) {
     return !!(obj.constructor && obj.constructor.isBuffer && obj.constructor.isBuffer(obj));
 };
 
-},{}],58:[function(require,module,exports){
+},{}],60:[function(require,module,exports){
 var events = require('events');
 var utils = require('./utils');
 var wrap = exports.wrap = {
@@ -5429,7 +6096,7 @@ exports.emitter = function(obj) {
   return new Emitter(obj);
 };
 
-},{"./utils":59,"events":3}],59:[function(require,module,exports){
+},{"./utils":61,"events":3}],61:[function(require,module,exports){
 exports.toBase26 = function(num) {
   var outString = '';
   var letters = 'abcdefghijklmnopqrstuvwxyz';
@@ -5465,7 +6132,7 @@ exports.emitEvents = function(emitter, type, name, args) {
   }
 };
 
-},{}],60:[function(require,module,exports){
+},{}],62:[function(require,module,exports){
 /* global define */
 /**
  * A base object for ECMAScript 5 style prototypal inheritance.
@@ -5609,7 +6276,7 @@ exports.emitEvents = function(emitter, type, name, args) {
 
 }));
 
-},{}],61:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -5636,16 +6303,16 @@ var _feathersHooks = require('feathers-hooks');
 
 var _feathersHooks2 = _interopRequireDefault(_feathersHooks);
 
-var _client9 = require('feathers-authentication/client');
+var _feathersAuthenticationClient = require('feathers-authentication-client');
 
-var _client10 = _interopRequireDefault(_client9);
+var _feathersAuthenticationClient2 = _interopRequireDefault(_feathersAuthenticationClient);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
-Object.assign(_client2.default, { socketio: _client6.default, primus: _client8.default, rest: _client4.default, hooks: _feathersHooks2.default, authentication: _client10.default });
+Object.assign(_client2.default, { socketio: _client6.default, primus: _client8.default, rest: _client4.default, hooks: _feathersHooks2.default, authentication: _feathersAuthenticationClient2.default });
 
 exports.default = _client2.default;
 module.exports = exports['default'];
 
-},{"feathers-authentication/client":4,"feathers-hooks":16,"feathers-primus/client":17,"feathers-rest/client":19,"feathers-socketio/client":37,"feathers/client":39}]},{},[61])(61)
+},{"feathers-authentication-client":8,"feathers-hooks":19,"feathers-primus/client":20,"feathers-rest/client":22,"feathers-socketio/client":40,"feathers/client":42}]},{},[63])(63)
 });
